@@ -25,10 +25,6 @@
    ```bash
    GOOGLE_API_KEY="$GOOGLE_API_KEY" docker compose up --detach --gpus all
    ```
-   *without GPU:*
-   ```bash
-   GOOGLE_API_KEY="$GOOGLE_API_KEY" docker compose up --detach
-   ```
 5. **Container Access:**
    ```bash
    docker exec -it ros2_turtlebot3 bash
