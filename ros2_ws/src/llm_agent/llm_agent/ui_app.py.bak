@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+import os
+import json
+import time
+
+import streamlit as st
+
+import rclpy
+from rclpy.node import Node
+from std_srvs.srv import Trigger
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+
+SYSTEM = (
+    "Du bist ein ROS2 Robot Assistant.\n"
+    "Du bekommst JSON Sensordaten aus ROS Tools und sollst:\n"
+    "1) Zustand kurz zusammenfassen\n"
+    "2) interpretieren (z.B. Hindernisnähe, Bewegung, Batterie)\n"
+    "3) sagen welcher der 4 Waypoints am nächsten ist (Name + Distanz)\n"
+    "Antworte knapp in Bulletpoints."
+)
+
+def get_model_name():
+    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+@st.cache_resource
+def get_llm():
+    if not os.getenv("GOOGLE_API_KEY"):
+        raise RuntimeError("GOOGLE_API_KEY ist nicht gesetzt.")
+    return ChatGoogleGenerativeAI(model=get_model_name())
+
+@st.cache_resource
+def get_ros_client():
+    rclpy.init(args=None)
+    node = Node("llm_streamlit_ui")
+    state_cli = node.create_client(Trigger, "/llm_tools/get_robot_state")
+    nearest_cli = node.create_client(Trigger, "/llm_tools/get_nearest_waypoint")
+    return node, state_cli, nearest_cli
+
+def call_trigger(node: Node, client, timeout=2.0):
+    if not client.wait_for_service(timeout_sec=timeout):
+        return None, f"Service {client.srv_name} not available"
+    fut = client.call_async(Trigger.Request())
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+    if fut.result() is None:
+        return None, f"Timeout calling {client.srv_name}"
+    res = fut.result()
+    if not res.success:
+        return None, f"{client.srv_name} returned success=False"
+    return res.message, None
+
+def build_payload(node, state_cli, nearest_cli, user_text):
+    state_msg, e1 = call_trigger(node, state_cli)
+    near_msg, e2 = call_trigger(node, nearest_cli)
+    payload = {
+        "user_message": user_text,
+        "robot_state": None if state_msg is None else json.loads(state_msg),
+        "nearest_waypoint": None if near_msg is None else json.loads(near_msg),
+        "errors": [x for x in [e1, e2] if x],
+        "ts": time.time(),
+    }
+    return payload
+
+def fallback_answer(payload):
+    rs = payload.get("robot_state") or {}
+    nw = (rs.get("nearest_waypoint") or {})
+    lines = []
+    if payload.get("errors"):
+        lines.append(f"- ⚠️ Tools Fehler: {payload['errors']}")
+    if rs:
+        lines.append(f"- Interpretation: {rs.get('interpretation')}")
+        if nw:
+            lines.append(f"- Nächster Waypoint: {nw.get('name')} ({nw.get('distance_m')} m)")
+    else:
+        lines.append("- Keine Roboterdaten verfügbar.")
+    return "\n".join(lines)
+
+def main():
+    st.set_page_config(page_title="ROS2 LLM Chatbot", layout="wide")
+    st.title("🤖 ROS2 LLM Chatbot (Gemini)")
+
+    st.sidebar.header("Settings")
+    st.sidebar.write(f"Model: `{get_model_name()}`")
+
+    # ROS
+    try:
+        node, state_cli, nearest_cli = get_ros_client()
+        st.sidebar.success("ROS Client: OK")
+        st.sidebar.write(f"- {state_cli.srv_name}")
+        st.sidebar.write(f"- {nearest_cli.srv_name}")
+    except Exception as e:
+        st.sidebar.error(f"ROS init error: {e}")
+        st.stop()
+
+    # LLM
+    try:
+        llm = get_llm()
+        st.sidebar.success("Gemini: OK")
+    except Exception as e:
+        st.sidebar.error(f"Gemini error: {e}")
+        st.stop()
+
+    if "history" not in st.session_state:
+        st.session_state.history = []
+
+    # show history
+    for msg in st.session_state.history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["text"])
+            if msg.get("payload") is not None:
+                with st.expander("Debug: Tool JSON"):
+                    st.json(msg["payload"])
+
+    user_text = st.chat_input("Stelle eine Frage, z.B. 'Wie ist der Zustand des Roboters?'")
+    if user_text:
+        st.session_state.history.append({"role": "user", "text": user_text})
+        with st.chat_message("user"):
+            st.markdown(user_text)
+
+        payload = build_payload(node, state_cli, nearest_cli, user_text)
+        prompt = SYSTEM + "\n\nJSON:\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Gemini denkt..."):
+                try:
+                    out = llm.invoke(prompt)
+                    answer = out.content
+                except Exception as e:
+                    answer = fallback_answer(payload) + f"\n\n(LLM-Fehler: {e})"
+            st.markdown(answer)
+            with st.expander("Debug: Tool JSON"):
+                st.json(payload)
+
+        st.session_state.history.append({"role": "assistant", "text": answer, "payload": payload})
+
+if __name__ == "__main__":
+    main()

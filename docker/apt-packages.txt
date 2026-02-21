@@ -1,0 +1,23 @@
+# Base tools
+git
+curl
+gdb
+gdbserver
+python3-pip
+python3-colcon-common-extensions
+
+# ROS core / tools
+ros-humble-rviz2
+ros-humble-robot-state-publisher
+ros-humble-joint-state-publisher
+
+
+# Gazebo / TurtleBot3
+ros-humble-gazebo-ros-pkgs
+ros-humble-turtlebot3
+ros-humble-turtlebot3-gazebo
+ros-humble-turtlebot3-navigation2
+
+
+# MoveIt / Control
+ros-humble-diff-drive-controller
