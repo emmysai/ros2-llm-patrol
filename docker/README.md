@@ -1,4 +1,4 @@
-# ROS2 TurtleBot3 – Docker Setup via Skript
+# ROS2 TurtleBot3
 
    ```bash
    cd chat2robot/docker
@@ -9,9 +9,10 @@
 # ROS2 TurtleBot3 -  Docker Setup
 1. **Set a new environment variable:**
    ```bash
-   export GOOGLE_API_KEY="ABCDFEGH12345678"
+   export GOOGLE_API_KEY="your_key_here"
    source ~/.bashrc
    ```
+
 2. **Change project directory:**
    ```bash
    cd ~/chat2robot/docker
@@ -21,7 +22,6 @@
    docker compose build
    ```
 4. **Container start:**
-   *with GPU:*
    ```bash
    GOOGLE_API_KEY="$GOOGLE_API_KEY" docker compose up --detach --gpus all
    ```
@@ -29,11 +29,11 @@
    ```bash
    GOOGLE_API_KEY="$GOOGLE_API_KEY" docker compose up --detach
    ```
-5. **Auf Container zugreifen:**
+5. **Container Access:**
    ```bash
    docker exec -it ros2_turtlebot3 bash
    ```
-6. **Container stoppen:**
+6. **Container Stop:**
    ```bash
    docker compose down
    ```
