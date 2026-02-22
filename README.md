@@ -193,10 +193,6 @@ ros2 service call /llm_tools/get_nearest_waypoint std_srvs/srv/Trigger {}
 
 The system prompt is formulated in German and the interaction is primarily conducted in German. Therefore it will work in German Language only.
 
-**Explanation:**\
-LLMs are predominantly trained on English-language data.\
-Technical contexts therefore tend to work more reliably in English.
-
 **Recommendation:**\
 For industrial applications, the system logic should primarily use English.\
 Multilingual support can be added at the UI level.
