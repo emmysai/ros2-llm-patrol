@@ -219,3 +219,6 @@ An LLM is however suitable as:\
 
 
 # ros2-llm-patrol
+
+docker container basis from:
+https://github.com/nils93/chat2robot
