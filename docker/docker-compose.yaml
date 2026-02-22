@@ -1,10 +1,10 @@
 services:
-  ros2:
+  ros2_environment:
     image: ros2-turtlebot3
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ros2_turtlebot3
+    container_name: ros2_tb3_container
     privileged: true
     network_mode: host
     ipc: host
@@ -12,13 +12,18 @@ services:
 
     command: >
       /bin/bash -c '
+        echo "Checking LLM API configuration...";
+
         if [ -z "$$GOOGLE_API_KEY" ] && [ -z "$$MISTRAL_API_KEY" ]; then
-          echo "Fehler: Weder GOOGLE_API_KEY noch MISTRAL_API_KEY gesetzt!";
+          echo "Error: No LLM API key detected.";
+          echo "Please define GOOGLE_API_KEY or MISTRAL_API_KEY before starting.";
           exit 1;
         fi;
-        echo "Verfügbare LLM APIs:";
-        [ -n "$$GOOGLE_API_KEY" ] && echo "  - Google Gemini ✓";
-        [ -n "$$MISTRAL_API_KEY" ] && echo "  - Mistral ✓";
+
+        echo "Active LLM backends:";
+        [ -n "$$GOOGLE_API_KEY" ] && echo "  Google Gemini enabled";
+        [ -n "$$MISTRAL_API_KEY" ] && echo "  Mistral enabled";
+
         exec bash;
       '
 

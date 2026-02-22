@@ -9,21 +9,33 @@ from std_srvs.srv import Trigger
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+#from langchain.agents import AgentExecutor, create_tool_calling_agent
+try:
+    # ältere LangChain Versionen
+    from langchain.agents import AgentExecutor
+except Exception:
+    # neuere LangChain Versionen exportieren AgentExecutor nicht mehr dort
+    from langchain.agents.agent import AgentExecutor
+
+from langchain.agents import create_tool_calling_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 SYSTEM_PROMPT = (
-    "Du bist ein ROS2 Robot Assistant als Tool-using Agent.\n"
-    "WICHTIGES VORGEHEN (immer):\n"
-    "1) Rufe zuerst das Tool get_robot_state auf.\n"
-    "2) Rufe danach das Tool get_nearest_waypoint auf.\n"
-    "3) Dann schreibe die Antwort.\n\n"
-    "AUFGABE:\n"
-    "- Fasse den Roboterzustand kurz zusammen.\n"
-    "- Interpretiere ihn (Bewegung, Hindernisnähe, Stabilität anhand IMU).\n"
-    "- Gib an, welcher der 4 Waypoints aktuell am nächsten ist (Name + Distanz).\n"
-    "Antworte kurz in Bulletpoints.\n"
+    "Du bist ein ROS2 LLM-Agent für einen mobilen Roboter.\n"
+    "Du darfst NUR Fragen zu diesen Themen beantworten:\n"
+    "A) Robot-Zustand: Sensorwerte zusammenfassen und interpretieren (odom/scan/imu/pose)\n"
+    "B) Nächster Punkt: welcher der 4 Waypoints am nächsten ist (Name + Distanz)\n"
+    "C) Kombiniert: Zustand + nächster Punkt\n\n"
+    "WICHTIG:\n"
+    "- Wenn die Nutzerfrage NICHT zu A/B/C gehört, antworte IMMER exakt:\n"
+    "  \"Ich kann nur Fragen zum Roboterzustand und zum nächsten der 4 Waypoints beantworten. "
+    "Frag z.B.: 'Wie ist der Zustand?' oder 'Welcher Punkt ist am nächsten?'\"\n"
+    "- In diesem Fall: KEINE Tools aufrufen.\n\n"
+    "TOOL-REGEL:\n"
+    "- Wenn die Nutzerfrage zu A/B/C gehört: rufe zuerst get_robot_state auf und danach get_nearest_waypoint.\n"
+    "- Danach antworte kurz in Bulletpoints.\n"
+    "- Interpretiere: Bewegung (Speed), Hindernisnähe (Laser), Stabilität/Rotation (IMU).\n"
 )
 
 FULL_PROMPT = ChatPromptTemplate.from_messages([
@@ -86,7 +98,7 @@ def main():
     executor = AgentExecutor(
         agent=agent,
         tools=tools,
-        verbose=True,  # zeigt Toolcalls im Terminal -> Beweis für Agentic Tool Calling
+        verbose=True,  #zeigt Toolcalls im Terminal -> Beweis für Agentic Tool Calling
         handle_parsing_errors=True
     )
 
@@ -100,10 +112,28 @@ def main():
 
         chat_history.append(HumanMessage(content=user))
 
+        #Topic-Gate: nur Robot State/Nearest Waypoint zulassen 
+        u = user.lower()
+
+        allowed = any(k in u for k in [
+            "zustand", "status", "sensor", "sensordaten", "robot", "roboter",
+            "imu", "odom", "scan", "laserscan", "pose", "position", "geschwindigkeit",
+            "nearest", "nächster", "naechster", "punkt", "waypoint", "ziel", "distanz", "distance"
+        ])
+
+        if not allowed:
+            msg = ("Ich kann nur Fragen zum Roboterzustand und zum nächsten der 4 Waypoints beantworten. "
+                "Frag z.B.: 'Wie ist der Zustand?' oder 'Welcher Punkt ist am nächsten?'")
+            print("\nAssistant:\n" + msg)
+            chat_history.append(AIMessage(content=msg))
+            continue
+
         result = executor.invoke({
             "input": user,
             "chat_history": chat_history
         })
+
+
 
         output = result["output"]
         print("\nAssistant:\n" + output)

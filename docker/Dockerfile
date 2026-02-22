@@ -1,12 +1,17 @@
-# Base image
+# ------------------------------------------------------------------
+# Basis-Image: ROS2 Humble Desktop (vollständige Variante)
+# ------------------------------------------------------------------
 FROM osrf/ros:humble-desktop-full
 
+# Deaktiviert interaktive Installationsabfragen während des Builds
 ENV DEBIAN_FRONTEND=noninteractive
 
-# TurtleBot3 model
+# Standardmodell für TurtleBot3 definieren
 ENV TURTLEBOT3_MODEL=burger
 
-# ---------- User ----------
+# ------------------------------------------------------------------
+# Benutzer im Container anlegen
+# ------------------------------------------------------------------
 ARG USERNAME=ubuntu
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
@@ -20,9 +25,10 @@ RUN groupadd --gid $USER_GID $USERNAME && \
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
-# ============================================================
-# === APT-Pakete installieren aus apt-packages.txt ===========
-# ============================================================
+# ------------------------------------------------------------------
+# Installation zusätzlicher Systemabhängigkeiten
+# (aus externer Paketliste)
+# ------------------------------------------------------------------
 COPY apt-packages.txt /tmp/apt-packages.txt
 
 RUN sudo apt-get update && \
@@ -30,18 +36,23 @@ RUN sudo apt-get update && \
     xargs sudo apt-get install -y --no-install-recommends && \
     sudo rm -rf /var/lib/apt/lists/*
 
-# ============================================================
-# === Python-Pakete installieren aus requirements.txt ========
-# ============================================================
+# ------------------------------------------------------------------
+# Installation der benötigten Python-Bibliotheken
+# ------------------------------------------------------------------
 COPY requirements.txt /tmp/requirements.txt
 
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# ---------- ROS sourcing ----------
+# ------------------------------------------------------------------
+# Automatisches Einbinden der ROS2-Umgebung beim Start
+# ------------------------------------------------------------------
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 
 RUN mkdir -p /home/$USERNAME/ros2_ws/src && \
     echo 'if [ -f ~/ros2_ws/install/setup.bash ]; then source ~/ros2_ws/install/setup.bash; fi' >> ~/.bashrc
 
+# Arbeitsverzeichnis auf ROS2-Workspace setzen
 WORKDIR /home/$USERNAME/ros2_ws
+
+# Standard-Startbefehl (interaktive Shell)
 CMD ["/bin/bash"]
