@@ -129,6 +129,7 @@ ros2 run llm_agent chat_cli
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 
+cd ~/ros2_ws/src/llm_agent/llm_agent
 python3 -m pip install --user streamlit
 python3 -m streamlit run app_neu.py --server.address 0.0.0.0 --server.port 8501
 ```
