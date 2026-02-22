@@ -6,39 +6,54 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import tool
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-SYSTEM = (
-    "Du bist ein ROS2 Robot Assistant.\n"
-    "Du bekommst JSON Sensordaten aus ROS Tools und sollst:\n"
-    "1) Zustand kurz zusammenfassen\n"
-    "2) interpretieren (z.B. Hindernisnähe, Bewegung, Batterie)\n"
-    "3) sagen welcher der 4 Waypoints am nächsten ist (Name + Distanz)\n"
-    "Antworte knapp in Bulletpoints."
+
+SYSTEM_PROMPT = (
+    "Du bist ein ROS2 Robot Assistant als Tool-using Agent.\n"
+    "WICHTIGES VORGEHEN (immer):\n"
+    "1) Rufe zuerst das Tool get_robot_state auf.\n"
+    "2) Rufe danach das Tool get_nearest_waypoint auf.\n"
+    "3) Dann schreibe die Antwort.\n\n"
+    "AUFGABE:\n"
+    "- Fasse den Roboterzustand kurz zusammen.\n"
+    "- Interpretiere ihn (Bewegung, Hindernisnähe, Stabilität anhand IMU).\n"
+    "- Gib an, welcher der 4 Waypoints aktuell am nächsten ist (Name + Distanz).\n"
+    "Antworte kurz in Bulletpoints.\n"
 )
 
-def build_gemini():
-    # LangChain (wie in chat2robot üblich) – falls installiert
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    return ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+FULL_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    ("placeholder", "{chat_history}"),
+    ("human", "{input}"),
+    ("placeholder", "{agent_scratchpad}"),
+])
 
 
-class ChatCLI(Node):
+class RosToolClient(Node):
     def __init__(self):
-        super().__init__("llm_chat_cli")
+        super().__init__("llm_chat_cli_agentic")
         self.state_cli = self.create_client(Trigger, "/llm_tools/get_robot_state")
         self.nearest_cli = self.create_client(Trigger, "/llm_tools/get_nearest_waypoint")
 
-    def call_trigger(self, client, timeout=3.0):
+    def call_trigger_json(self, client, timeout=3.0):
         if not client.wait_for_service(timeout_sec=timeout):
-            return None, f"Service {client.srv_name} not available"
+            return {"error": f"Service {client.srv_name} not available"}
         fut = client.call_async(Trigger.Request())
         rclpy.spin_until_future_complete(self, fut, timeout_sec=timeout)
         if fut.result() is None:
-            return None, f"Timeout calling {client.srv_name}"
+            return {"error": f"Timeout calling {client.srv_name}"}
         res = fut.result()
         if not res.success:
-            return None, f"{client.srv_name} returned success=False"
-        return res.message, None
+            return {"error": f"{client.srv_name} returned success=False"}
+        try:
+            return json.loads(res.message)
+        except Exception:
+            return {"error": "Invalid JSON returned", "raw": res.message}
 
 
 def main():
@@ -46,30 +61,54 @@ def main():
         print("ERROR: GOOGLE_API_KEY not set in environment.")
         return
 
-    llm = build_gemini()
-
     rclpy.init()
-    node = ChatCLI()
+    node = RosToolClient()
 
-    print("Gemini Chatbot gestartet. 'exit' zum Beenden.")
+    # LLM (Gemini)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
+
+    # Agent-Tools (LLM entscheidet selbst, wann sie aufgerufen werden)
+    @tool("get_robot_state")
+    def get_robot_state() -> str:
+        """Gibt JSON mit internen Sensorwerten zurück (pose, odom-speed, laser stats, imu, interpretation)."""
+        data = node.call_trigger_json(node.state_cli)
+        return json.dumps(data, ensure_ascii=False)
+
+    @tool("get_nearest_waypoint")
+    def get_nearest_waypoint() -> str:
+        """Gibt JSON zum nächsten der 4 Waypoints zurück (Name, Distanz, Koordinaten, Pose)."""
+        data = node.call_trigger_json(node.nearest_cli)
+        return json.dumps(data, ensure_ascii=False)
+
+    tools = [get_robot_state, get_nearest_waypoint]
+
+    agent = create_tool_calling_agent(llm, tools, FULL_PROMPT)
+    executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,  # zeigt Toolcalls im Terminal -> Beweis für Agentic Tool Calling
+        handle_parsing_errors=True
+    )
+
+    chat_history = []
+
+    print("Agentic Tool-Calling Chat gestartet. 'exit' zum Beenden.")
     while True:
         user = input("\nYou> ").strip()
         if user.lower() in ("exit", "quit"):
             break
 
-        state_msg, e1 = node.call_trigger(node.state_cli)
-        near_msg, e2 = node.call_trigger(node.nearest_cli)
+        chat_history.append(HumanMessage(content=user))
 
-        payload = {
-            "user_message": user,
-            "robot_state": None if state_msg is None else json.loads(state_msg),
-            "nearest_waypoint": None if near_msg is None else json.loads(near_msg),
-            "errors": [x for x in [e1, e2] if x],
-        }
+        result = executor.invoke({
+            "input": user,
+            "chat_history": chat_history
+        })
 
-        prompt = SYSTEM + "\n\nJSON:\n" + json.dumps(payload, ensure_ascii=False, indent=2)
-        out = llm.invoke(prompt)
-        print("\nAssistant:\n" + out.content)
+        output = result["output"]
+        print("\nAssistant:\n" + output)
+
+        chat_history.append(AIMessage(content=output))
 
     node.destroy_node()
     rclpy.shutdown()

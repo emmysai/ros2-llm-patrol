@@ -11,7 +11,6 @@ from std_srvs.srv import Trigger
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from sensor_msgs.msg import Imu
-from sensor_msgs.msg import BatteryState
 
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
@@ -34,8 +33,7 @@ class LLMAgentNode(Node):
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("imu_topic", "/imu")
-        self.declare_parameter("battery_topic", "/battery_state")
-
+        
         yaml_path = self.get_parameter("waypoints_yaml").get_parameter_value().string_value
         if not yaml_path:
             pkg_dir = Path(__file__).resolve().parents[1]
@@ -50,12 +48,11 @@ class LLMAgentNode(Node):
         self.last_odom = None
         self.last_scan = None
         self.last_imu = None
-        self.last_batt = None
+        
 
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._on_odom, 10)
         self.create_subscription(LaserScan, self.get_parameter("scan_topic").value, self._on_scan, 10)
         self.create_subscription(Imu, self.get_parameter("imu_topic").value, self._on_imu, 10)
-        self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._on_batt, 10)
 
         self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -75,9 +72,6 @@ class LLMAgentNode(Node):
 
     def _on_imu(self, msg: Imu):
         self.last_imu = msg
-
-    def _on_batt(self, msg: BatteryState):
-        self.last_batt = msg
 
     def _get_pose_map(self):
         try:
@@ -117,7 +111,9 @@ class LLMAgentNode(Node):
 
     def _interpret(self, state):
         notes = []
-        lm = state.get("laser_min_range_m")
+        lm = None
+        if state.get("laser") is not None:
+            lm = state["laser"].get("min_m")
         if lm is not None:
             if lm < 0.35:
                 notes.append("Achtung: Hindernis sehr nah (<0.35m).")
@@ -130,9 +126,6 @@ class LLMAgentNode(Node):
         if sp is not None:
             notes.append("Roboter steht fast." if sp < 0.02 else "Roboter bewegt sich.")
 
-        bp = state.get("battery_percent")
-        if bp is not None:
-            notes.append("Batterie niedrig (<20%)." if bp < 20 else "Batterie ok.")
 
         return " ".join(notes) if notes else "Keine Interpretation verfügbar (zu wenig Sensorwerte)."
 
@@ -143,19 +136,33 @@ class LLMAgentNode(Node):
         if self.last_odom is not None:
             v = self.last_odom.twist.twist.linear
             speed = math.sqrt(v.x * v.x + v.y * v.y)
-
-        laser_min = None
+        
+        laser = None
         if self.last_scan is not None and self.last_scan.ranges:
             vals = [r for r in self.last_scan.ranges if math.isfinite(r)]
             if vals:
-                laser_min = float(min(vals))
+                laser = {
+                    "min_m": float(min(vals)),
+                    "mean_m": float(sum(vals) / len(vals)),
+                    "max_m": float(max(vals)),
+                    "count": int(len(vals)),
+                }
 
-        batt_pct = None
-        if self.last_batt is not None:
-            if self.last_batt.percentage > 1.0:
-                batt_pct = float(self.last_batt.percentage)
-            elif self.last_batt.percentage >= 0.0:
-                batt_pct = float(self.last_batt.percentage * 100.0)
+        imu = None
+        if self.last_imu is not None:
+            imu = {
+                "angular_velocity": {
+                    "x": float(self.last_imu.angular_velocity.x),
+                    "y": float(self.last_imu.angular_velocity.y),
+                    "z": float(self.last_imu.angular_velocity.z),
+                },
+                "linear_acceleration": {
+                    "x": float(self.last_imu.linear_acceleration.x),
+                    "y": float(self.last_imu.linear_acceleration.y),
+                    "z": float(self.last_imu.linear_acceleration.z),
+                },
+            }
+        
 
         nearest = self._nearest_waypoint(pose)
 
@@ -163,8 +170,8 @@ class LLMAgentNode(Node):
             "time_unix": time.time(),
             "pose": pose,
             "speed_mps": speed,
-            "laser_min_range_m": laser_min,
-            "battery_percent": batt_pct,
+            "laser": laser,
+            "imu": imu,
             "nearest_waypoint": None if nearest is None else {
                 "index": nearest["index"],
                 "name": nearest["name"],
