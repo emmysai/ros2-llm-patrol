@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import json
 import os
+import json
+import time
 
 import streamlit as st
 
@@ -8,43 +9,45 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import tool
-
-# AgentExecutor import (kompatibel)
-try:
-    from langchain.agents import AgentExecutor
-except Exception:
-    from langchain.agents.agent import AgentExecutor
-
-from langchain.agents import create_tool_calling_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
-SYSTEM_PROMPT = (
-    "Du bist ein ROS2 LLM-Agent für einen mobilen Roboter.\n"
-    "Du darfst NUR Fragen zu diesen Themen beantworten:\n"
-    "A) Robot-Zustand: Sensorwerte zusammenfassen und interpretieren (odom/scan/imu/pose)\n"
-    "B) Nächster Punkt: welcher der 4 Waypoints am nächsten ist (Name + Distanz)\n"
-    "C) Kombiniert: Zustand + nächster Punkt\n\n"
-    "WICHTIG:\n"
-    "- Wenn die Nutzerfrage NICHT zu A/B/C gehört, antworte IMMER exakt:\n"
-    "  \"Ich kann nur Fragen zum Roboterzustand und zum nächsten der 4 Waypoints beantworten. "
-    "Frag z.B.: 'Wie ist der Zustand?' oder 'Welcher Punkt ist am nächsten?'\"\n"
-    "- In diesem Fall: KEINE Tools aufrufen.\n\n"
-    "TOOL-REGEL:\n"
-    "- Wenn die Nutzerfrage zu A/B/C gehört: rufe zuerst get_robot_state auf und danach get_nearest_waypoint.\n"
-    "- Danach antworte kurz in Bulletpoints.\n"
-    "- Interpretiere: Bewegung (Speed), Hindernisnähe (Laser), Stabilität/Rotation (IMU).\n"
-)
+SYSTEM = """
+Du bist ein wissenschaftlicher ROS2 Robot Assistant.
 
-FULL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT),
-    ("placeholder", "{chat_history}"),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
+Du bekommst reale Sensordaten aus einem TurtleBot3 in Gazebo.
+
+Verfuegbare Daten (nur falls vorhanden):
+- Position (x,y)
+- Orientierung (yaw)
+- Lineare Geschwindigkeit (m/s)
+- Winkelgeschwindigkeit (rad/s)
+- Minimale Hindernisdistanz (LaserScan)
+- Naechster Waypoint (Name + Distanz)
+
+Deine Aufgabe:
+1) Zustand strukturiert zusammenfassen
+2) Kurz interpretieren (Bewegung, Hindernisnaehe)
+3) Naechsten Waypoint angeben
+
+Regeln:
+- Keine Einleitung
+- Keine Meta-Kommentare
+- Keine Erwaehnung von Tools/JSON/Debug
+- Keine Annahmen ueber nicht vorhandene Sensoren (z.B. Batterie)
+- Nutze exakt dieses Ausgabeformat:
+
+Zustand:
+- ...
+- ...
+
+Interpretation:
+- ...
+- ...
+
+Naechster Waypoint:
+- ...
+"""
 
 
 def model_name() -> str:
@@ -52,133 +55,172 @@ def model_name() -> str:
 
 
 @st.cache_resource
-def ros_node_and_clients():
+def ros_clients():
+    # ROS init einmal pro Streamlit Prozess
     rclpy.init(args=None)
-    node = Node("llm_streamlit_agentic_ui")
+    node = Node("llm_streamlit_ui")
+
     state_cli = node.create_client(Trigger, "/llm_tools/get_robot_state")
     nearest_cli = node.create_client(Trigger, "/llm_tools/get_nearest_waypoint")
     return node, state_cli, nearest_cli
 
 
-def call_trigger_json(node: Node, client, timeout=3.0):
+@st.cache_resource
+def llm_client():
+    if not os.getenv("GOOGLE_API_KEY"):
+        raise RuntimeError("GOOGLE_API_KEY ist nicht gesetzt.")
+    return ChatGoogleGenerativeAI(model=model_name())
+
+
+def call_trigger(node: Node, client, timeout=2.0):
     if not client.wait_for_service(timeout_sec=timeout):
-        return {"error": f"Service {client.srv_name} not available"}
+        return None
     fut = client.call_async(Trigger.Request())
     rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
     if fut.result() is None:
-        return {"error": f"Timeout calling {client.srv_name}"}
+        return None
     res = fut.result()
     if not res.success:
-        return {"error": f"{client.srv_name} returned success=False"}
-    try:
-        return json.loads(res.message)
-    except Exception:
-        return {"error": "Invalid JSON returned", "raw": res.message}
+        return None
+    return res.message
 
 
-@st.cache_resource
-def agent_executor():
-    if not os.getenv("GOOGLE_API_KEY"):
-        raise RuntimeError("GOOGLE_API_KEY ist nicht gesetzt.")
-
-    node, state_cli, nearest_cli = ros_node_and_clients()
-
-    llm = ChatGoogleGenerativeAI(model=model_name(), temperature=0.3)
-
-    @tool("get_robot_state")
-    def get_robot_state() -> str:
-        """Gibt JSON mit internen Sensorwerten zurück (odom/scan/imu/pose + interpretation)."""
-        data = call_trigger_json(node, state_cli)
-        return json.dumps(data, ensure_ascii=False)
-
-    @tool("get_nearest_waypoint")
-    def get_nearest_waypoint() -> str:
-        """Gibt JSON zum nächsten der 4 Waypoints zurück (Name + Distanz)."""
-        data = call_trigger_json(node, nearest_cli)
-        return json.dumps(data, ensure_ascii=False)
-
-    tools = [get_robot_state, get_nearest_waypoint]
-
-    agent = create_tool_calling_agent(llm, tools, FULL_PROMPT)
-    executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=False,  # UI sauber; für Debug -> True
-        handle_parsing_errors=True,
-    )
-    return executor
+def extract_min_laser(scan_obj):
+    # scan_obj expected from your tool JSON; if not present -> None
+    # We keep it robust: handle "laser_min_range_m" from tool if provided.
+    if not isinstance(scan_obj, dict):
+        return None
+    v = scan_obj.get("laser_min_range_m")
+    return v
 
 
-def off_topic_message() -> str:
-    return ("Ich kann nur Fragen zum Roboterzustand und zum nächsten der 4 Waypoints beantworten. "
-            "Frag z.B.: 'Wie ist der Zustand?' oder 'Welcher Punkt ist am nächsten?'")
+def build_clean_payload(user_text: str, rs: dict, nw: dict):
+    """
+    Wir geben dem LLM NUR das, was er braucht (wissenschaftlich clean).
+    """
+    payload = {"question": user_text}
+
+    pose = rs.get("pose") if isinstance(rs, dict) else None
+    speed = rs.get("speed_mps") if isinstance(rs, dict) else None
+    laser_min = rs.get("laser_min_range_m") if isinstance(rs, dict) else None
+
+    payload["state"] = {
+        "pose": pose,
+        "speed_mps": speed,
+        "laser_min_range_m": laser_min,
+    }
+    payload["nearest_waypoint"] = nw if isinstance(nw, dict) else None
+    return payload
 
 
-def is_allowed_topic(user_text: str) -> bool:
-    u = user_text.lower()
-    return any(k in u for k in [
-        "zustand", "status", "sensor", "sensordaten", "robot", "roboter",
-        "imu", "odom", "scan", "laserscan", "pose", "position", "geschwindigkeit",
-        "nearest", "nächster", "naechster", "punkt", "waypoint", "ziel", "distanz", "distance"
-    ])
+def fallback_answer(rs: dict, nw: dict):
+    """
+    Falls Gemini nicht erreichbar ist, liefern wir trotzdem die 3 Blöcke.
+    """
+    lines = []
+
+    # Zustand
+    lines.append("Zustand:")
+    pose = (rs or {}).get("pose")
+    speed = (rs or {}).get("speed_mps")
+    laser_min = (rs or {}).get("laser_min_range_m")
+
+    if pose and isinstance(pose, dict):
+        x = pose.get("x")
+        y = pose.get("y")
+        yaw = pose.get("yaw")
+        if x is not None and y is not None:
+            lines.append(f"- Position: ({x:.2f}, {y:.2f})")
+        if yaw is not None:
+            lines.append(f"- Orientierung (yaw): {yaw:.2f} rad")
+    if speed is not None:
+        lines.append(f"- Geschwindigkeit: {float(speed):.2f} m/s")
+    if laser_min is not None:
+        lines.append(f"- Minimale Hindernisdistanz: {float(laser_min):.2f} m")
+
+    if len(lines) == 1:
+        lines.append("- (keine Daten)")
+
+    # Interpretation
+    lines.append("\nInterpretation:")
+    interp = (rs or {}).get("interpretation")
+    if interp:
+        # Interpretation aus deinem Tool-Node
+        # (Falls du dort schon eine wissenschaftliche Interpretation baust)
+        lines.append(f"- {interp}")
+    else:
+        lines.append("- Keine Interpretation verfuegbar.")
+
+    # Nächster Waypoint
+    lines.append("\nNaechster Waypoint:")
+    if nw and isinstance(nw, dict):
+        name = nw.get("name")
+        dist = nw.get("distance_m")
+        if name is not None and dist is not None:
+            try:
+                lines.append(f"- {name} ({float(dist):.2f} m)")
+            except Exception:
+                lines.append(f"- {name} ({dist} m)")
+        else:
+            lines.append("- (nicht bestimmbar)")
+    else:
+        lines.append("- (nicht bestimmbar)")
+
+    return "\n".join(lines)
 
 
 def main():
-    st.set_page_config(page_title="ROS2 LLM Chatbot (Agentic UI)", layout="centered")
-    st.title("ROS2 LLM Chatbot (Agentic Tool Calling)")
+    st.set_page_config(page_title="ROS2 LLM Chatbot", layout="centered")
+    st.title("ROS2 LLM Chatbot")
 
+    # Minimalistische Sidebar
     with st.sidebar:
         st.markdown("**Konfiguration**")
         st.markdown(f"- Model: `{model_name()}`")
-        st.markdown("- Topic-Gate: nur Zustand / nächster Waypoint")
-        if st.button("Chat zurücksetzen"):
-            st.session_state.history = []
-            st.session_state.lc_history = []
-            st.rerun()
 
-    executor = agent_executor()
+    # init clients
+    node, state_cli, nearest_cli = ros_clients()
+    llm = llm_client()
 
     if "history" not in st.session_state:
-        st.session_state.history = []  # für Anzeige
-    if "lc_history" not in st.session_state:
-        st.session_state.lc_history = []  # LangChain Messages
+        st.session_state.history = []
 
-    # History rendern
+    # display chat history
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["text"])
 
-    user_text = st.chat_input("Frage stellen (z.B. 'Wie ist der Zustand?' / 'Welcher Punkt ist am nächsten?')")
+    user_text = st.chat_input("Frage stellen (z.B. 'Wie ist der Zustand des Roboters?')")
 
     if user_text:
-        # user anzeigen
+        # show user
         st.session_state.history.append({"role": "user", "text": user_text})
         with st.chat_message("user"):
             st.markdown(user_text)
 
-        st.session_state.lc_history.append(HumanMessage(content=user_text))
+        # call tools
+        state_msg = call_trigger(node, state_cli)
+        nearest_msg = call_trigger(node, nearest_cli)
 
-        # Topic Gate (wie im CLI)
-        if not is_allowed_topic(user_text):
-            msg = off_topic_message()
-            with st.chat_message("assistant"):
-                st.markdown(msg)
-            st.session_state.history.append({"role": "assistant", "text": msg})
-            st.session_state.lc_history.append(AIMessage(content=msg))
-            return
+        rs = json.loads(state_msg) if state_msg else {}
+        nw = json.loads(nearest_msg) if nearest_msg else {}
 
-        # Agentic Tool Calling
+        # build clean payload (only required data)
+        payload = build_clean_payload(user_text, rs, nw)
+        prompt = SYSTEM + "\n\nDaten:\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+
+        # LLM (clean output only)
         with st.chat_message("assistant"):
-            with st.spinner("Antwort wird erstellt..."):
-                result = executor.invoke({
-                    "input": user_text,
-                    "chat_history": st.session_state.lc_history
-                })
-                answer = result["output"]
-                st.markdown(answer)
+            try:
+                with st.spinner("Antwort wird erstellt..."):
+                    out = llm.invoke(prompt)
+                    answer = out.content
+            except Exception:
+                answer = fallback_answer(rs, nw)
+
+            st.markdown(answer)
 
         st.session_state.history.append({"role": "assistant", "text": answer})
-        st.session_state.lc_history.append(AIMessage(content=answer))
 
 
 if __name__ == "__main__":
