@@ -125,7 +125,7 @@ def is_allowed_topic(user_text: str) -> bool:
 
 def main():
     st.set_page_config(page_title="ROS2 LLM Chatbot (Agentic UI)", layout="centered")
-    st.title("ROS2 LLM Chatbot (Agentic Tool Calling)")
+    st.title("ROS2 LLM Chatbot")
 
     with st.sidebar:
         st.markdown("**Konfiguration**")
